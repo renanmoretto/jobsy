@@ -1,4 +1,5 @@
 import time
+import traceback
 from typing import Callable, Literal, Optional, List
 from datetime import datetime, timedelta
 from functools import partial
@@ -7,8 +8,12 @@ import pytz
 
 
 class Scheduler:
-    def __init__(self):
+    def __init__(self, safe_execution: bool = True):
         self.jobs: List[Job] = []
+        self.safe_execution = safe_execution
+
+    def every(self, interval: str) -> 'Job':
+        return Job(self, func=None, job_type='periodic', interval=interval)
 
     def add_job(self, job: 'Job'):
         self.jobs.append(job)
@@ -16,11 +21,16 @@ class Scheduler:
     def run_pending(self):
         for job in self.jobs:
             if job.should_run:
-                job.run()
+                job.run(self.safe_execution)
 
     def run_all(self):
         for job in self.jobs:
-            job.run()
+            job.run(self.safe_execution)
+
+    def loop(self, interval: int = 1):
+        while True:
+            self.run_pending()
+            time.sleep(interval)
 
 
 class Job:
@@ -96,9 +106,10 @@ class Job:
 
         return self.next_run <= datetime.now()
 
-    def run(self):
+    def run(self, safe: bool = True):
+        func = safe_wrap(self.func, self.name) if safe else self.func
         if self.how == 'sync':
-            self.func()
+            func()
         elif self.how == 'thread':
             raise NotImplementedError('Threading is not implemented yet')
         elif self.how == 'process':
@@ -107,12 +118,16 @@ class Job:
         self.last_run = datetime.now()
         self.next_run = self._calc_next_run()
 
-    def do(self, job: Callable, *args, **kwargs):
+    def do(self, job: Callable, *args, **kwargs) -> 'Job':
         self.func = partial(job, *args, **kwargs)
 
         return self
 
-    def tz(self, tz: str):
+    def as_name(self, name: str) -> 'Job':
+        self.name = name
+        return self
+
+    def tz(self, tz: str) -> 'Job':
         self.tz = pytz.timezone(tz)
         return self
 
@@ -146,6 +161,32 @@ class Job:
         return self
 
 
+def safe_wrap(job: Callable, name: str | None = None):
+    """
+    Wrapper that returns a safe version of the given job callable.
+    Any exception raised during execution will be caught and printed.
+    """
+
+    def wrapper():
+        # Handle both regular functions and partial objects for name
+        if name is not None:
+            job_name = name
+        elif hasattr(job, '__name__'):
+            job_name = job.__name__
+        elif hasattr(job, 'func'):  # For partial objects
+            job_name = job.func.__name__
+        else:
+            job_name = 'unknown_job'
+
+        try:
+            job()
+        except Exception as e:
+            print(f'Error executing job {job_name}, {str(e)}')
+            traceback.print_exc()
+
+    return wrapper
+
+
 def _interval_to_seconds(interval: str) -> int:
     unit = interval[-1]
     if unit == 's':
@@ -164,15 +205,8 @@ default_scheduler = Scheduler()
 
 
 def every(interval: str) -> Job:
-    return Job(
-        default_scheduler,
-        func=None,
-        job_type='periodic',
-        interval=interval,
-    )
+    return default_scheduler.every(interval)
 
 
 def loop(interval: int = 1, scheduler: Scheduler = default_scheduler):
-    while True:
-        scheduler.run_pending()
-        time.sleep(interval)
+    scheduler.loop(interval)
