@@ -1,7 +1,7 @@
 import time
 import traceback
-from typing import Callable, Literal, Optional, List
-from datetime import datetime, timedelta
+import datetime
+from typing import Callable, Literal, Optional, List, Tuple
 from functools import partial
 
 import pytz
@@ -14,6 +14,9 @@ class Scheduler:
 
     def every(self, interval: str) -> 'Job':
         return Job(self, func=None, job_type='periodic', interval=interval)
+
+    def at(self, time: str) -> 'Job':
+        return Job(self, func=None, job_type='time', at=time)
 
     def add_job(self, job: 'Job'):
         self.jobs.append(job)
@@ -63,24 +66,81 @@ class Job:
         else:
             self.name = name
         self.how: Literal['sync', 'thread', 'process'] = 'sync'
-        self.days: List[str] = []
-        self.days_int: List[int] = []
+        self.days: Optional[List[str]] = None
+        self.days_int: Optional[List[int]] = None
         self.start: Optional[str] = None
         self.end: Optional[str] = None
-        self.last_run: Optional[datetime] = None
-        self.next_run: datetime = self._calc_next_run()
+        self.last_run: Optional[datetime.datetime] = None
+        self.next_run: datetime.datetime = self._calc_next_run()
 
         self.scheduler.add_job(self)
 
-    def _calc_next_run_periodic(self) -> datetime:
+    def _calc_next_run_periodic(self) -> datetime.datetime:
         # TODO: add tz
         interval_seconds = _interval_to_seconds(self.interval)
-        if self.last_run is None:
-            return datetime.now() + timedelta(seconds=interval_seconds)
-        return self.last_run + timedelta(seconds=interval_seconds)
 
-    def _calc_next_run_time(self) -> datetime:
-        raise NotImplementedError('Time jobs are not implemented yet')
+        now = datetime.datetime.now()
+        last_run = self.last_run or now
+
+        if self.days_int is None and self.start is not None and self.end is not None:
+            return last_run + datetime.timedelta(seconds=interval_seconds)
+
+        if self.start is None:
+            start_time = datetime.time(0)
+        else:
+            start_time = datetime.time(*_parse_at_time(self.start))
+
+        if self.end is None:
+            end_time = datetime.time(23, 59, 59)
+        else:
+            end_time = datetime.time(*_parse_at_time(self.end))
+
+        prob_next_run = last_run + datetime.timedelta(seconds=interval_seconds)
+
+        # check if today is still in
+        if prob_next_run.time() > end_time:
+            prob_next_run = datetime.datetime.combine(
+                now.date() + datetime.timedelta(days=1), start_time
+            )
+        if prob_next_run.time() < start_time:
+            prob_next_run = datetime.datetime.combine(now.date(), start_time)
+
+        # check days
+        if self.days_int:
+            if prob_next_run.weekday() not in self.days_int:
+                # find next day
+                while prob_next_run.weekday() not in self.days_int:
+                    prob_next_run += datetime.timedelta(days=1)
+                # starts at start_time
+                prob_next_run = datetime.datetime.combine(prob_next_run.date(), start_time)
+
+        return prob_next_run
+
+    def _calc_next_run_time(self) -> datetime.datetime:
+        # TODO: add tz
+        hour, minutes, seconds = _parse_at_time(self.at)
+
+        now = datetime.datetime.now()
+
+        if self.days_int is None:
+            # check if today is still in
+            next_run = datetime.datetime.combine(now.date(), datetime.time(hour, minutes, seconds))
+            if next_run < now:
+                next_run = next_run + datetime.timedelta(days=1)
+            return next_run
+
+        # check if today is still in
+        if now > datetime.datetime.combine(now.date(), datetime.time(hour, minutes, seconds)):
+            aux = now + datetime.timedelta(days=1)
+        else:
+            aux = now
+
+        # find next day inside days_int
+        while aux.weekday() not in self.days_int:
+            aux += datetime.timedelta(days=1)
+        next_run = datetime.datetime.combine(aux.date(), datetime.time(hour, minutes, seconds))
+
+        return next_run
 
     def _calc_next_run(self) -> datetime:
         if self.job_type == 'periodic':
@@ -94,20 +154,20 @@ class Job:
         if self.next_run is None:
             return False
 
+        # FIXME add '%H:%M:%S'
         if self.start is not None and self.end is not None:
-            if self.next_run < datetime.strptime(
+            if self.next_run < datetime.datetime.strptime(
                 self.start, '%H:%M'
-            ) or self.next_run > datetime.strptime(self.end, '%H:%M'):
+            ) or self.next_run > datetime.datetime.strptime(self.end, '%H:%M'):
                 return False
 
-        if self.days_int:
-            if self.next_run.weekday() not in self.days_int:
-                return False
+        if self.days_int and self.next_run.weekday() not in self.days_int:
+            return False
 
-        return self.next_run <= datetime.now()
+        return self.next_run <= datetime.datetime.now()
 
     def run(self, safe: bool = True):
-        func = safe_wrap(self.func, self.name) if safe else self.func
+        func = _safe_wrap(self.func, self.name) if safe else self.func
         if self.how == 'sync':
             func()
         elif self.how == 'thread':
@@ -115,7 +175,7 @@ class Job:
         elif self.how == 'process':
             raise NotImplementedError('Multiprocessing is not implemented yet')
 
-        self.last_run = datetime.now()
+        self.last_run = datetime.datetime.now()
         self.next_run = self._calc_next_run()
 
     def do(self, job: Callable, *args, **kwargs) -> 'Job':
@@ -138,6 +198,7 @@ class Job:
 
     def on(self, *days: List[str | int]) -> 'Job':
         self.days = days
+        self.days_int = []
         for day in days:
             if isinstance(day, str):
                 days_map = {
@@ -161,7 +222,30 @@ class Job:
         return self
 
 
-def safe_wrap(job: Callable, name: str | None = None):
+def _parse_at_time(time_str: str) -> Tuple[int, int, int]:
+    """
+    Parse a time string in format 'HH:MM' or 'HH:MM:SS' and return tuple of (hour, minutes, seconds)
+
+    Args:
+        time_str: String in format 'HH:MM' or 'HH:MM:SS'
+
+    Returns:
+        Tuple of (hour, minutes, seconds)
+    """
+    parts = time_str.split(':')
+
+    if len(parts) == 2:
+        hour, minutes = parts
+        seconds = 0
+    elif len(parts) == 3:
+        hour, minutes, seconds = parts
+    else:
+        raise ValueError("Time must be in format 'HH:MM' or 'HH:MM:SS'")
+
+    return int(hour), int(minutes), int(seconds)
+
+
+def _safe_wrap(job: Callable, name: str | None = None):
     """
     Wrapper that returns a safe version of the given job callable.
     Any exception raised during execution will be caught and printed.
@@ -206,6 +290,10 @@ default_scheduler = Scheduler()
 
 def every(interval: str) -> Job:
     return default_scheduler.every(interval)
+
+
+def at(time: str) -> Job:
+    return default_scheduler.at(time)
 
 
 def loop(interval: int = 1, scheduler: Scheduler = default_scheduler):
