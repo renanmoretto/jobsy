@@ -6,6 +6,7 @@ authors = [
     {name = "renan_moretto@outlook.com"}
 ]
 readme = "README.md"
+repository = "https://github.com/renanmoretto/jobsy"
 requires-python = ">=3.10"
 dependencies = [
     "pytz (>=2025.2,<2026.0)"
