@@ -98,12 +98,13 @@ class Job:
         prob_next_run = last_run + datetime.timedelta(seconds=interval_seconds)
 
         # check if today is still in
+        if prob_next_run.time() < start_time:
+            prob_next_run = datetime.datetime.combine(now.date(), start_time)
+
         if prob_next_run.time() > end_time:
             prob_next_run = datetime.datetime.combine(
                 now.date() + datetime.timedelta(days=1), start_time
             )
-        if prob_next_run.time() < start_time:
-            prob_next_run = datetime.datetime.combine(now.date(), start_time)
 
         # check days
         if self.days_int:
@@ -153,17 +154,6 @@ class Job:
     def should_run(self) -> bool:
         if self.next_run is None:
             return False
-
-        # FIXME add '%H:%M:%S'
-        if self.start is not None and self.end is not None:
-            if self.next_run < datetime.datetime.strptime(
-                self.start, '%H:%M'
-            ) or self.next_run > datetime.datetime.strptime(self.end, '%H:%M'):
-                return False
-
-        if self.days_int and self.next_run.weekday() not in self.days_int:
-            return False
-
         return self.next_run <= datetime.datetime.now()
 
     def run(self, safe: bool = True):
@@ -194,22 +184,24 @@ class Job:
     def between(self, start: str, end: str) -> 'Job':
         self.start = start
         self.end = end
+        # recalculates next_run
+        self.next_run = self._calc_next_run()
         return self
 
     def on(self, *days: List[str | int]) -> 'Job':
+        days_map = {
+            'mon': 0,
+            'tue': 1,
+            'wed': 2,
+            'thu': 3,
+            'fri': 4,
+            'sat': 5,
+            'sun': 6,
+        }
         self.days = days
         self.days_int = []
         for day in days:
             if isinstance(day, str):
-                days_map = {
-                    'mon': 0,
-                    'tue': 1,
-                    'wed': 2,
-                    'thu': 3,
-                    'fri': 4,
-                    'sat': 5,
-                    'sun': 6,
-                }
                 try:
                     day_int = days_map[day]
                 except KeyError:
@@ -219,6 +211,8 @@ class Job:
                     raise ValueError(f'Invalid day: {day}')
                 day_int = day
             self.days_int.append(day_int)
+        # recalculates next_run
+        self.next_run = self._calc_next_run()
         return self
 
 
@@ -298,3 +292,11 @@ def at(time: str) -> Job:
 
 def loop(interval: int = 1, scheduler: Scheduler = default_scheduler):
     scheduler.loop(interval)
+
+
+def run_pending(scheduler: Scheduler = default_scheduler):
+    scheduler.run_pending()
+
+
+def run_all(scheduler: Scheduler = default_scheduler):
+    scheduler.run_all()
