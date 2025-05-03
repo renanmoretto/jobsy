@@ -1,6 +1,8 @@
 import time
 import traceback
 import datetime
+import threading
+import multiprocessing
 from functools import partial
 from typing import Callable, Literal, Optional, List, Tuple, Any
 
@@ -189,9 +191,9 @@ class Job:
         if self.how == 'sync':
             func()
         elif self.how == 'thread':
-            raise NotImplementedError('Threading is not implemented yet')
+            threading.Thread(target=func).start()
         elif self.how == 'process':
-            raise NotImplementedError('Multiprocessing is not implemented yet')
+            multiprocessing.Process(target=func).start()
 
         self.last_run = self._now()
         self.next_run = self._calc_next_run()
@@ -208,8 +210,10 @@ class Job:
     def between(self, start: str, end: str) -> 'Job':
         self.start = start
         self.end = end
+
         # recalculates next_run
         self.next_run = self._calc_next_run()
+
         return self
 
     def on(self, *days: List[str | int]) -> 'Job':
@@ -235,8 +239,10 @@ class Job:
                     raise ValueError(f'Invalid day: {day}')
                 day_int = day
             self.days_int.append(day_int)
+
         # recalculates next_run
         self.next_run = self._calc_next_run()
+
         return self
 
 
@@ -270,12 +276,11 @@ def _safe_wrap(job: Callable, name: str | None = None):
     """
 
     def wrapper():
-        # Handle both regular functions and partial objects for name
         if name is not None:
             job_name = name
         elif hasattr(job, '__name__'):
             job_name = job.__name__
-        elif hasattr(job, 'func'):  # For partial objects
+        elif hasattr(job, 'func'):
             job_name = job.func.__name__
         else:
             job_name = 'unknown_job'
@@ -283,7 +288,7 @@ def _safe_wrap(job: Callable, name: str | None = None):
         try:
             job()
         except Exception as e:
-            print(f'Error executing job {job_name}, {str(e)}')
+            print(f'Error executing job {job_name}, {str(e)}')  # TODO: log
             traceback.print_exc()
 
     return wrapper
